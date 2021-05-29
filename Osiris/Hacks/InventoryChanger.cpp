@@ -62,7 +62,8 @@ public:
         Skin,
         Music,
         Collectible,
-        NameTag
+        NameTag,
+        Patch
     };
 
     struct GameItem {
@@ -74,9 +75,10 @@ public:
         bool isMusic() const noexcept { return type == Type::Music; }
         bool isCollectible() const noexcept { return type == Type::Collectible; }
         bool isNameTag() const noexcept { return type == Type::NameTag; }
+        bool isPatch() const noexcept { return type == Type::Patch; }
 
         // TODO: We need a better name for this
-        bool hasPaintKit() const noexcept { return isSkin() || isGlove() || isSticker() || isMusic(); }
+        bool hasPaintKit() const noexcept { return isSkin() || isGlove() || isSticker() || isMusic() || isPatch(); }
 
         Type type;
         std::uint8_t rarity;
@@ -143,7 +145,7 @@ private:
             if (paintKit->id == 0 || paintKit->id == 9001) // ignore workshop_default
                 continue;
 
-            _paintKits.emplace_back(paintKit->id, std::move(std::wstring{ L" | " }.append(interfaces->localize->findSafe(paintKit->itemName.data()))));
+            _paintKits.emplace_back(paintKit->id, interfaces->localize->findSafe(paintKit->itemName.data()));
 
             const auto isGlove = (paintKit->id >= 10000);
             for (auto it = std::ranges::lower_bound(kitsWeapons, paintKit->id, {}, &KitWeapon::paintKit); it != kitsWeapons.end() && it->paintKit == paintKit->id; ++it) {
@@ -166,12 +168,18 @@ private:
             if (stickerKit->id == 0)
                 continue;
 
-            if (std::string_view name{ stickerKit->name.data() }; name.starts_with("spray") || name.starts_with("patch") || name.ends_with("graffiti"))
-                continue;
+            const auto name = std::string_view{ stickerKit->name.data() };
+            const auto isPatch = name.starts_with("patch");
+            const auto isGraffiti = !isPatch && (name.starts_with("spray") || name.ends_with("graffiti"));
+            const auto isSticker = !isPatch && !isGraffiti;
 
-            std::wstring name = std::wstring{ L" | " } + interfaces->localize->findSafe(stickerKit->id != 242 ? stickerKit->itemName.data() + 1 : "StickerKit_dhw2014_teamdignitas_gold");
-            _paintKits.emplace_back(stickerKit->id, std::move(name));
-            _gameItems.emplace_back(Type::Sticker, stickerKit->rarity, WeaponId::Sticker, _paintKits.size() - 1, stickerKit->inventoryImage.data());
+            if (isSticker) {
+                _paintKits.emplace_back(stickerKit->id, interfaces->localize->findSafe(stickerKit->id != 242 ? stickerKit->itemName.data() : "StickerKit_dhw2014_teamdignitas_gold"));
+                _gameItems.emplace_back(Type::Sticker, stickerKit->rarity, WeaponId::Sticker, _paintKits.size() - 1, stickerKit->inventoryImage.data());
+            } else if (isPatch) {
+                _paintKits.emplace_back(stickerKit->id, interfaces->localize->findSafe(stickerKit->itemName.data()));
+                _gameItems.emplace_back(Type::Patch, stickerKit->rarity, WeaponId::Patch, _paintKits.size() - 1, stickerKit->inventoryImage.data());
+            }
         }
 
         const auto& musicMap = itemSchema->musicKits;
@@ -180,7 +188,7 @@ private:
             if (musicKit->id == 1 || musicKit->id == 2)
                 continue;
 
-            std::wstring name = std::wstring{ L" | " } + interfaces->localize->findSafe(musicKit->nameLocalized);
+            std::wstring name = interfaces->localize->findSafe(musicKit->nameLocalized);
             _paintKits.emplace_back(musicKit->id, std::move(name));
             _gameItems.emplace_back(Type::Music, 3, WeaponId::MusicKit, _paintKits.size() - 1, musicKit->inventoryImage);
         }
@@ -399,9 +407,10 @@ static void applyGloves(Entity* local) noexcept
     local->body() = 1;
 
     const auto attributeList = glove->econItemView().getAttributeList();
+    const auto& dynamicData = dynamicGloveData[item.getDynamicDataIndex()];
     memory->setOrAddAttributeValueByName(attributeList, "set item texture prefab", static_cast<float>(itemData.id));
-    memory->setOrAddAttributeValueByName(attributeList, "set item texture wear", 0.01f);
-    memory->setOrAddAttributeValueByName(attributeList, "set item texture seed", static_cast<float>(1));
+    memory->setOrAddAttributeValueByName(attributeList, "set item texture wear", dynamicData.wear);
+    memory->setOrAddAttributeValueByName(attributeList, "set item texture seed", static_cast<float>(dynamicData.seed));
 
     if (auto& definitionIndex = glove->itemDefinitionIndex2(); definitionIndex != item.get().weaponID) {
         definitionIndex = item.get().weaponID;
@@ -846,6 +855,9 @@ void InventoryChanger::run(FrameStage stage) noexcept
                 econItem->quality = 1;
         } else if (item.isNameTag()) {
             econItem->weaponId = WeaponId::NameTag;
+        } else if (item.isPatch()) {
+            econItem->weaponId = WeaponId::Patch;
+            econItem->setStickerID(0, StaticData::paintKits()[item.dataIndex].id);
         }
 
         baseTypeCache->addObject(econItem);
@@ -961,7 +973,7 @@ namespace ImGui
         const auto itemName = StaticData::getWeaponName(item.weaponID).c_str();
         const auto itemNameSize = CalcTextSize(itemName, nullptr);
 
-        auto paintKitName = item.hasPaintKit() ? StaticData::paintKits()[item.dataIndex].name.c_str() : "";
+        const auto paintKitName = item.hasPaintKit() ? StaticData::paintKits()[item.dataIndex].name.c_str() : "";
         const auto paintKitNameSize = CalcTextSize(paintKitName, nullptr);
 
         PushID(itemName);
@@ -972,7 +984,7 @@ namespace ImGui
 
         const auto height = ImMax(paintKitNameSize.y, ImMax(itemNameSize.y, iconSizeSmall.y));
         const auto rarityBulletRadius = IM_FLOOR(height * 0.2f);
-        const auto size = ImVec2{ iconSizeSmall.x + paintKitNameSize.x + rarityBulletRadius + itemNameSize.x, height };
+        const auto size = ImVec2{ iconSizeSmall.x + rarityBulletRadius * 2.0f + itemNameSize.x + paintKitNameSize.x, height };
         
         ImVec2 pos = window->DC.CursorPos;
         pos.y += window->DC.CurrLineTextBaseOffset;
@@ -985,8 +997,12 @@ namespace ImGui
 
         const auto itemNameMin = ImVec2{ rarityBulletPos.x + rarityBulletRadius + 5.0f, pos.y };
         const auto itemNameMax = itemNameMin + ImVec2{ itemNameSize.x, size.y };
+        
+        const auto separatorHeightInv = IM_FLOOR(height * 0.2f);
+        const auto separatorMin = ImVec2{ itemNameMax.x + 5.0f, pos.y + separatorHeightInv };
+        const auto separatorMax = separatorMin + ImVec2{ 1.0f, height - 2.0f * separatorHeightInv };
 
-        const auto paintKitNameMin = ImVec2{ itemNameMax.x, pos.y };
+        const auto paintKitNameMin = ImVec2{ separatorMax.x + 5.0f, pos.y };
         const auto paintKitNameMax = paintKitNameMin + ImVec2{ paintKitNameSize.x, size.y };
 
         // Selectables are meant to be tightly packed together with no click-gap, so we extend their box to cover spacing between selectable.
@@ -1043,6 +1059,8 @@ namespace ImGui
         window->DrawList->AddCircleFilled(rarityBulletPos, rarityBulletRadius, rarityColor, 12);
 
         RenderTextClipped(itemNameMin, itemNameMax, itemName, nullptr, &itemNameSize, { 0.0f, 0.5f }, &bb);
+        if (paintKitName[0] != '\0')
+            window->DrawList->AddRectFilled(separatorMin, separatorMax, GetColorU32(ImGuiCol_Text));
         RenderTextClipped(paintKitNameMin, paintKitNameMax, paintKitName, nullptr, &paintKitNameSize, { 0.0f, 0.5f }, &bb);
 
         if (pressed && (window->Flags & ImGuiWindowFlags_Popup) && !(window->DC.ItemFlags & ImGuiItemFlags_SelectableDontClosePopup))
@@ -1242,6 +1260,12 @@ json InventoryChanger::toJson() noexcept
             itemConfig["Type"] = "Name Tag";
             break;
         }
+        case StaticData::Type::Patch: {
+            itemConfig["Type"] = "Patch";
+            const auto& staticData = StaticData::paintKits()[gameItem.dataIndex];
+            itemConfig["Patch ID"] = staticData.id;
+            break;
+        }
         }
 
         items.push_back(std::move(itemConfig));
@@ -1420,6 +1444,14 @@ void InventoryChanger::fromJson(const json& j) noexcept
             inventory.emplace_back(std::ranges::distance(StaticData::gameItems().begin(), staticData));
         } else if (type == "Name Tag") {
             const auto staticData = std::ranges::find_if(StaticData::gameItems(), [](const auto& gameItem) { return gameItem.isNameTag(); });
+            if (staticData != StaticData::gameItems().end())
+                inventory.emplace_back(std::ranges::distance(StaticData::gameItems().begin(), staticData));
+        } else if (type == "Patch") {
+            if (!jsonItem.contains("Patch ID") || !jsonItem["Patch ID"].is_number_integer())
+                continue;
+
+            const int patchID = jsonItem["Patch ID"];
+            const auto staticData = std::ranges::find_if(StaticData::gameItems(), [patchID](const auto& gameItem) { return gameItem.isPatch() && StaticData::paintKits()[gameItem.dataIndex].id == patchID; });
             if (staticData != StaticData::gameItems().end())
                 inventory.emplace_back(std::ranges::distance(StaticData::gameItems().begin(), staticData));
         }
